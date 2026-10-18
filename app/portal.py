@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 """Captive portal Badan Wifi Nasional: voucher + panel admin."""
 import subprocess, json, os, sys, datetime, re, base64, secrets, threading, time
+import html as _html
+
+# rate limiting sederhana untuk endpoint sensitif (/claim)
+_CLAIM_HITS = {}
+def claim_rate_ok(ip):
+    now = time.time()
+    hits = [t for t in _CLAIM_HITS.get(ip, []) if now - t < 300]
+    if len(hits) >= 10:  # maks 10x klaim per 5 menit per IP
+        return False
+    hits.append(now)
+    _CLAIM_HITS[ip] = hits
+    return True
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -819,6 +831,9 @@ class H(BaseHTTPRequestHandler):
             self._redir("/pay?id=" + pay_id)
             return
         if u.path == "/claim":
+            if not claim_rate_ok(self.client_address[0]):
+                self._send(page_claim("Terlalu banyak percobaan. Tunggu 5 menit."))
+                return
             raw = q.get("order_code", [""])[0].strip().upper()
             code = raw.replace(" ", "").replace("-", "")
             pays = load_pays()

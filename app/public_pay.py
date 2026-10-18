@@ -12,11 +12,36 @@ dan status pembayaran live.
 import json
 import os
 import sys
+import html
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, unquote
 
 PAYF = "/opt/portal/payment.json"
 PAYMENTS = "/opt/portal/payments.json"
+
+# rate limiting sederhana: maks 30 request/menit per IP
+RATE = {}
+RATE_MAX = 30
+RATE_WINDOW = 60
+
+def rate_ok(ip):
+    now = time.time()
+    hits = RATE.get(ip, [])
+    hits = [t for t in hits if now - t < RATE_WINDOW]
+    if len(hits) >= RATE_MAX:
+        return False
+    hits.append(now)
+    RATE[ip] = hits
+    # bersihkan IP lama sesekali
+    if len(RATE) > 500:
+        for k in list(RATE):
+            if not [t for t in RATE[k] if now - t < RATE_WINDOW]:
+                del RATE[k]
+    return True
+
+def esc(s):
+    return html.escape(str(s or ""), quote=True)
 
 sys.path.insert(0, "/opt/portal")
 try:
@@ -64,11 +89,14 @@ margin-top:14px;font-size:13px;line-height:1.8;color:#334155}
 
 
 def find_payment(code):
+    # validasi format ketat: hanya huruf/angka/dash, maks 12 char
     code = (code or "").upper().replace("-", "").replace(" ", "")
+    if not code or len(code) > 12 or not code.isalnum():
+        return None
     pays = load_json(PAYMENTS)
     for p in pays.values():
         oc = (p.get("order_code") or "").replace("-", "")
-        if oc == code and code:
+        if oc == code:
             return p
     return None
 
@@ -92,8 +120,9 @@ def check_paid(pay):
 
 
 def page_bayar(pay, paid):
-    ocode = pay.get("order_code", "")
-    bill = pay.get("bill_url") or "#"
+    ocode = esc(pay.get("order_code", ""))
+    bill = esc(pay.get("bill_url") or "#")
+    label = esc(pay.get("label", "-"))
     if paid:
         status = '<div class="badge b-green">LUNAS ✅</div>'
         action = (
@@ -118,7 +147,7 @@ def page_bayar(pay, paid):
             "<h1>BADAN WIFI NASIONAL</h1>"
             "<p class='sub'>Pembayaran paket internet</p>"
             "<div class='code'>" + ocode + "</div>" + status +
-            "<div class='row'><span>Paket</span><span>" + pay.get("label", "-") +
+            "<div class='row'><span>Paket</span><span>" + label +
             "</span></div>"
             "<div class='row' style='border:0'><span>Nominal</span><span>" +
             rp(pay.get("amount", 0)) + "</span></div>" +
@@ -132,6 +161,16 @@ class H(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        client_ip = self.client_address[0]
+        if not rate_ok(client_ip):
+            b = b"Terlalu banyak request. Coba lagi sebentar."
+            self.send_response(429)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(b)))
+            self.send_header("Retry-After", "60")
+            self.end_headers()
+            self.wfile.write(b)
+            return
         u = urlparse(self.path)
         parts = unquote(u.path).strip("/").split("/")
         # path: /bayar/<KODE>  (Funnel strip /bayar, jadi terima dua bentuk)
@@ -152,6 +191,9 @@ class H(BaseHTTPRequestHandler):
             self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(b)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(b)
 

@@ -11,6 +11,7 @@ import http.client
 
 ROUTES = [
     ("/bayar", "127.0.0.1", 8090),
+    ("/webhook", "192.168.50.1", 8080),
 ]
 DEFAULT = ("127.0.0.1", 8000)
 
