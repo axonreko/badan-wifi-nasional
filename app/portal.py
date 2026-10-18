@@ -113,6 +113,15 @@ button.pkg:hover{border-color:#1e40af;background:#eff6ff}
 .pkg-price{font-size:15px;font-weight:700;color:#1e40af}
 img.qr{width:220px;height:220px;margin:6px auto 4px;display:block;border:1px solid #e2e8f0;
 border-radius:12px;padding:8px;background:#fff}
+.order-box{background:#eff6ff;border:1px dashed #1e40af;border-radius:10px;
+padding:14px;margin:12px 0}
+.order-code{font-family:ui-monospace,monospace;font-size:26px;font-weight:800;
+letter-spacing:3px;text-align:center;color:#1e40af;margin-top:6px}
+.steps{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;
+padding:12px 14px;margin-top:14px;font-size:13px;line-height:1.7;color:#334155}
+.info-box{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;
+padding:12px 14px;margin:12px 0;font-size:13px;line-height:1.7;color:#14532d}
+.info-box b{color:#166534}
 a{color:#1e40af}
 @media(max-width:640px){.grid2{grid-template-columns:1fr}.card{padding:28px 22px}}
 """
@@ -149,10 +158,20 @@ def pay_config():
         # merge default untuk key yang belum ada
         for k, v in DEFAULT_PAYMENT.items():
             cfg.setdefault(k, v)
+        # mode mayar tanpa API key = demo (fallback aman)
+        if cfg.get("mode") == "mayar" and not cfg["mayar"].get("api_key"):
+            cfg["_real_mode"] = "demo"
+        else:
+            cfg["_real_mode"] = cfg.get("mode", "demo")
         return cfg
     except Exception:
         json.dump(DEFAULT_PAYMENT, open(PAYF, "w"), indent=1)
-        return dict(DEFAULT_PAYMENT)
+        cfg = dict(DEFAULT_PAYMENT)
+        cfg["_real_mode"] = "demo"
+        return cfg
+
+def pay_mode(cfg):
+    return cfg.get("_real_mode", cfg.get("mode", "demo"))
 
 def load_pays():
     try:
@@ -190,6 +209,7 @@ def create_payment(pkg_id, ip):
         "label": pkg["label"], "status": "pending",
         "created": datetime.datetime.now().isoformat(timespec="seconds"),
         "transaction_id": None, "bill_url": None,
+        "order_code": gen_code(),
     }
     if cfg["mode"] == "mayar" and cfg["mayar"]["api_key"]:
         ok, info = mayar_create_invoice(cfg, pay)
@@ -204,26 +224,35 @@ def create_payment(pkg_id, ip):
     save_pays(pays)
     return pay_id, None
 
-def activate_payment(pay_id):
-    """Aktifkan akses internet untuk pembayaran yang lunas."""
+def activate_payment_for_ip(pay, ip):
+    """Aktifkan akses untuk IP tertentu (bisa beda dari IP saat beli,
+    mis. user putus-sambung WiFi untuk bayar pakai kuota)."""
     pays = load_pays()
-    pay = pays.get(pay_id)
-    if not pay or pay["status"] == "paid":
-        return False
-    pay["status"] = "paid"
-    pay["paid_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+    pid = pay["id"]
+    pay = pays.get(pid, pay)
+    if pay["status"] != "paid":
+        pay["status"] = "paid"
+        pay["paid_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+    pay["claimed_ip"] = ip
     save_pays(pays)
-    ip = pay["ip"]
     dur = int(pay["duration"])
     end = datetime.datetime.now().timestamp() + dur
     s = load_ses()
-    s[ip] = {"code": "QRIS-" + pay_id[:6].upper(),
+    s[ip] = {"code": "QRIS-" + pid[:6].upper(),
              "start": datetime.datetime.now().isoformat(timespec="seconds"),
              "end": end, "duration": dur, "via": "qris"}
     save_ses(s)
     subprocess.run(["ipset", "add", "portal_allow", ip,
                     "timeout", str(dur)], capture_output=True)
     return True
+
+def activate_payment(pay_id):
+    """Aktifkan akses internet untuk pembayaran yang lunas."""
+    pays = load_pays()
+    pay = pays.get(pay_id)
+    if not pay or pay["status"] == "paid":
+        return False
+    return activate_payment_for_ip(pay, pay["ip"])
 
 # ---------- Mayar (klien asli dari repo badan-wifi-nasional-qris-paymet) ----------
 def _mayar_client(cfg):
@@ -337,8 +366,14 @@ def form(err=""):
         "<input class=\"code\" id=\"v\" name=\"voucher\" placeholder=\"XXXX-XXXX\"\n"
         "maxlength=\"12\" autocomplete=\"off\" autofocus required>\n"
         "<button type=\"submit\">Hubungkan</button></form>"
-        "<div class=\"meta\" style=\"text-align:center\">"
-        "Belum punya voucher? <a href=\"/buy\">Beli paket via QRIS</a></div>")
+        "<div class=\"info-box\">"
+        "<b>2 cara dapat internet:</b><br>"
+        "1. <b>Voucher cash</b> — beli voucher fisik ke penjual, masukkan kodenya di atas. "
+        "Cocok kalau HP-mu nggak ada kuota.<br>"
+        "2. <b>Bayar via QRIS</b> — <a href=\"/buy\">beli paket di sini</a> "
+        "(butuh kuota HP saat bayar). Sudah bayar? "
+        "<a href=\"/claim\">Klaim akses di sini</a>."
+        "</div>")
 
 def success(code, dur_sec=0):
     info = ""
@@ -350,6 +385,20 @@ def success(code, dur_sec=0):
         "<div class=\"ok-icon\">&#10003;</div><h1>Terhubung</h1>\n"
         "<p class=\"sub\">Perangkat ini sekarang memiliki akses internet.</p>\n"
         "<div class=\"meta\">Voucher <b>" + code + "</b> telah digunakan.</div>" + info)
+
+def page_claim(msg=""):
+    m = "<div class=\"err\">" + msg + "</div>" if msg else ""
+    return page("Badan Wifi Nasional - Klaim Pembayaran",
+        LOGO_IMG.replace('logo-img', 'logo-img sm') +
+        "<h1 style=\"text-align:center\">Klaim Akses</h1>\n"
+        "<p class=\"sub\" style=\"text-align:center\">Sudah bayar via QRIS pakai "
+        "kuota HP? Masukkan kode order kamu:</p>\n" + m +
+        "<form method=\"POST\" action=\"/claim\">"
+        "<input class=\"code\" name=\"order_code\" placeholder=\"XXXX-XXXX\" "
+        "autocomplete=\"off\" style=\"text-transform:uppercase\">"
+        "<button type=\"submit\">Aktifkan Internet</button></form>"
+        "<div class=\"meta\" style=\"text-align:center\">"
+        "<a href=\"/\">Kembali</a></div>")
 
 def page_buy():
     cfg = pay_config()
@@ -363,22 +412,29 @@ def page_buy():
             "<span class=\"pkg-price\">" + rp(p["price"]) + "</span>"
             "</button></form>")
     demo_note = ""
-    if cfg["mode"] == "demo":
+    if pay_mode(cfg) == "demo":
         demo_note = ("<div class=\"meta\" style=\"text-align:center\">"
                      "Mode demo &mdash; pembayaran disimulasikan, "
                      "tidak ada uang asli.</div>")
+    quota_note = (
+        "<div class=\"info-box\">"
+        "<b>Ngga punya kuota HP?</b> Bayar QRIS butuh internet dari kuota HP "
+        "kamu dulu (matikan WiFi saat bayar).<br>"
+        "Kalau kuotamu habis, beli <b>voucher fisik bayar cash</b> aja ke "
+        "penjual — langsung dapat kode, masukkan di halaman utama."
+        "</div>")
     return page("Badan Wifi Nasional - Beli Paket",
         LOGO_IMG +
         "<h1 style=\"text-align:center\">Pilih Paket Internet</h1>\n"
         "<p class=\"sub\" style=\"text-align:center\">Bayar via QRIS, "
-        "akses langsung aktif otomatis.</p>\n"
+        "akses langsung aktif otomatis.</p>\n" + quota_note +
         "<div class=\"pkgs\">" + cards + "</div>\n"
         "<div class=\"meta\" style=\"text-align:center\">"
         "Punya kode voucher? <a href=\"/\">Masukkan di sini</a></div>" + demo_note)
 
 def page_pay(pay):
     cfg = pay_config()
-    if cfg["mode"] == "demo":
+    if pay_mode(cfg) == "demo":
         action = (
             "<form method=\"POST\" action=\"/pay/confirm\" style=\"margin-top:18px\">"
             "<input type=\"hidden\" name=\"id\" value=\"" + pay["id"] + "\">"
@@ -390,15 +446,23 @@ def page_pay(pay):
     else:
         # mode mayar: link pembayaran bisa diklik langsung (tanpa scan HP lain)
         bill = pay.get("bill_url") or "#"
+        ocode = pay.get("order_code", "")
         action = (
+            "<div class=\"order-box\"><div class=\"meta\" style=\"text-align:center\">"
+            "Kode order kamu:</div>"
+            "<div class=\"order-code\">" + ocode + "</div></div>"
             "<a href=\"" + bill + "\" target=\"_blank\">"
-            "<button type=\"button\" style=\"margin-top:18px\">"
+            "<button type=\"button\" style=\"margin-top:14px\">"
             "Buka Halaman Pembayaran</button></a>"
-            "<div class=\"meta\" style=\"text-align:center\">"
-            "Klik tombol di atas <b>pakai kuota HP</b> untuk bayar via "
-            "QRIS / GoPay / OVO / DANA / transfer bank.<br>"
-            "atau scan QR di bawah dari HP lain:</div>"
-            "<script>setTimeout(function(){location.reload()},10000)</script>")
+            "<div class=\"steps\">"
+            "<b>Cara bayar pakai kuota HP:</b><br>"
+            "1. <b>Screenshot</b> kode order di atas<br>"
+            "2. <b>Matikan WiFi</b> HP (pakai kuota dulu)<br>"
+            "3. Klik tombol di atas, bayar via QRIS / e-wallet<br>"
+            "4. <b>Nyalakan WiFi</b> lagi, connect ke <b>BADAN WIFI NASIONAL</b><br>"
+            "5. Masukkan kode order di halaman utama"
+            "</div>"
+            "<script>setTimeout(function(){location.reload()},15000)</script>")
         qr_block = ("<img class=\"qr\" src=\"/pay/qr?id=" + pay["id"] +
                     "\" alt=\"QRIS\">")
     return page("Badan Wifi Nasional - Bayar QRIS",
@@ -633,6 +697,9 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/buy":
             self._send(page_buy())
             return
+        if u.path == "/claim":
+            self._send(page_claim())
+            return
         if u.path == "/pay":
             q = parse_qs(u.query)
             pay = load_pays().get(q.get("id", [""])[0])
@@ -730,10 +797,38 @@ class H(BaseHTTPRequestHandler):
                 return
             self._redir("/pay?id=" + pay_id)
             return
+        if u.path == "/claim":
+            raw = q.get("order_code", [""])[0].strip().upper()
+            code = raw.replace(" ", "").replace("-", "")
+            pays = load_pays()
+            pay = None
+            for p in pays.values():
+                oc = (p.get("order_code") or "").replace("-", "")
+                if oc == code and code:
+                    pay = p
+                    break
+            if not pay:
+                self._send(page_claim("Kode order tidak ditemukan."))
+                return
+            if pay["status"] == "paid":
+                # sudah lunas: aktifkan IP saat ini
+                activate_payment_for_ip(pay, self.client_address[0])
+                self._send(success("QRIS-" + pay["id"][:6].upper(),
+                                   int(pay["duration"])))
+                return
+            # cek ke Mayar apakah sudah bayar
+            cfg = pay_config()
+            if mayar_check_status(cfg, pay) == "paid":
+                activate_payment_for_ip(pay, self.client_address[0])
+                self._send(success("QRIS-" + pay["id"][:6].upper(),
+                                   int(pay["duration"])))
+            else:
+                self._send(page_claim("Belum ada pembayaran untuk kode ini."))
+            return
         if u.path == "/pay/confirm":
             # mode demo: simulasi pembayaran berhasil
             cfg = pay_config()
-            if cfg["mode"] != "demo":
+            if pay_mode(cfg) != "demo":
                 self.send_response(403)
                 self.end_headers()
                 return
