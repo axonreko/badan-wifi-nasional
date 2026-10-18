@@ -34,7 +34,7 @@ fi
 echo "== 1/8 Paket sistem =="
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq hostapd dnsmasq ipset nftables python3 iptables
+apt-get install -y -qq hostapd dnsmasq ipset nftables python3 iptables python3-qrcode
 
 echo "== 2/8 File aplikasi -> /opt/portal =="
 mkdir -p /opt/portal

@@ -128,9 +128,19 @@ python3 /opt/portal/gen_voucher.py 5 --durasi 1jam --hari 7  # + expired 7 hari
 
 ## Rencana: pembayaran QRIS otomatis (Mayar)
 
-Rencana integrasi: halaman pilih paket durasi → bayar via QRIS (Mayar API,
-mode sandbox dulu) → webhook/polling → voucher aktif otomatis.
-Belum diimplementasikan.
+Status: **mode demo sudah jalan**. Alur: halaman `/buy` (pilih paket) →
+`/pay` (QR QRIS) → bayar → akses aktif otomatis sesuai durasi paket.
+
+- Mode `demo`: pembayaran disimulasikan via tombol (tanpa uang asli).
+- Mode `mayar`: butuh API key Mayar (sandbox: `https://api.mayar.club/hl/v2`).
+  Cara aktifkan: daftar di mayar.id → ambil API key → isi di
+  `/opt/portal/payment.json` (`mode: "mayar"`, `mayar.api_key`,
+  `mayar.webhook_token`) → fungsi `mayar_create_invoice()` /
+  `mayar_check_status()` di `portal.py` tinggal diisi.
+- Webhook: `POST /webhook/mayar?token=...` (event `payment.received`).
+
+Paket default (bisa diubah di `/opt/portal/payment.json`):
+1 jam Rp2.000 · 3 jam Rp5.000 · 12 jam Rp10.000 · 1 hari Rp15.000
 
 ## Keamanan
 
