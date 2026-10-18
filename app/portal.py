@@ -385,19 +385,27 @@ def page_pay(pay):
             "<button type=\"submit\">Saya Sudah Bayar (Simulasi)</button></form>"
             "<div class=\"meta\" style=\"text-align:center\">Mode demo: "
             "klik tombol untuk mensimulasikan pembayaran berhasil.</div>")
+        qr_block = ("<img class=\"qr\" src=\"/pay/qr?id=" + pay["id"] +
+                    "\" alt=\"QRIS\">")
     else:
+        # mode mayar: link pembayaran bisa diklik langsung (tanpa scan HP lain)
+        bill = pay.get("bill_url") or "#"
         action = (
+            "<a href=\"" + bill + "\" target=\"_blank\">"
+            "<button type=\"button\" style=\"margin-top:18px\">"
+            "Buka Halaman Pembayaran</button></a>"
             "<div class=\"meta\" style=\"text-align:center\">"
-            "Scan QR dengan GoPay / OVO / DANA / m-banking.<br>"
-            "Halaman ini mengecek otomatis.</div>"
-            "<script>setTimeout(function(){location.reload()},8000)</script>")
+            "Klik tombol di atas <b>pakai kuota HP</b> untuk bayar via "
+            "QRIS / GoPay / OVO / DANA / transfer bank.<br>"
+            "atau scan QR di bawah dari HP lain:</div>"
+            "<script>setTimeout(function(){location.reload()},10000)</script>")
+        qr_block = ("<img class=\"qr\" src=\"/pay/qr?id=" + pay["id"] +
+                    "\" alt=\"QRIS\">")
     return page("Badan Wifi Nasional - Bayar QRIS",
         LOGO_IMG.replace('logo-img', 'logo-img sm') +
         "<h1 style=\"text-align:center\">Bayar " + rp(pay["amount"]) + "</h1>\n"
         "<p class=\"sub\" style=\"text-align:center\">Paket <b>" + pay["label"] +
-        "</b> &middot; scan QRIS di bawah:</p>\n"
-        "<img class=\"qr\" src=\"/pay/qr?id=" + pay["id"] + "\" alt=\"QRIS\">" +
-        action)
+        "</b></p>\n" + qr_block + action)
 
 def admin_pass():
     try:
@@ -653,7 +661,8 @@ class H(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             try:
-                data = make_qr_png(pay.get("qr_data", "BADANWIFINASIONAL"))
+                qr_data = pay.get("qr_data") or pay.get("bill_url") or "BADANWIFINASIONAL"
+                data = make_qr_png(qr_data)
                 self.send_response(200)
                 self.send_header("Content-Type", "image/png")
                 self.send_header("Content-Length", str(len(data)))
