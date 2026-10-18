@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Captive portal Badan Wifi Nasional: voucher + panel admin."""
-import subprocess, json, os, datetime, re, base64, secrets, threading, time
+import subprocess, json, os, sys, datetime, re, base64, secrets, threading, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -9,6 +9,24 @@ PORT = 8080
 VF = "/opt/portal/vouchers.json"
 SESF = "/opt/portal/sessions.json"
 PASSF = "/opt/portal/admin_pass.txt"
+PAYF = "/opt/portal/payment.json"
+PAYMENTS = "/opt/portal/payments.json"
+
+DEFAULT_PAYMENT = {
+    "mode": "demo",  # demo | mayar
+    "currency": "Rp",
+    "packages": [
+        {"id": "p1", "label": "1 Jam", "duration": 3600, "price": 2000},
+        {"id": "p2", "label": "3 Jam", "duration": 10800, "price": 5000},
+        {"id": "p3", "label": "12 Jam", "duration": 43200, "price": 10000},
+        {"id": "p4", "label": "1 Hari", "duration": 86400, "price": 15000},
+    ],
+    "mayar": {
+        "api_key": "",
+        "api_base": "https://api.mayar.club/hl/v2",
+        "webhook_token": ""
+    }
+}
 
 # preset durasi akses (detik): label -> detik. 0 = tanpa batas waktu
 DURATIONS = [
@@ -86,6 +104,16 @@ tr:last-child td{border-bottom:none}
 .meta b{color:#334155}
 .topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:12px;flex-wrap:wrap}
 .topbar h1{margin:0}
+.pkgs{display:flex;flex-direction:column;gap:10px;margin-bottom:8px}
+button.pkg{display:flex;justify-content:space-between;align-items:center;width:100%;
+margin:0;padding:15px 18px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;
+cursor:pointer;color:#0f172a}
+button.pkg:hover{border-color:#1e40af;background:#eff6ff}
+.pkg-label{font-size:15px;font-weight:650}
+.pkg-price{font-size:15px;font-weight:700;color:#1e40af}
+img.qr{width:220px;height:220px;margin:6px auto 4px;display:block;border:1px solid #e2e8f0;
+border-radius:12px;padding:8px;background:#fff}
+a{color:#1e40af}
 @media(max-width:640px){.grid2{grid-template-columns:1fr}.card{padding:28px 22px}}
 """
 
@@ -113,6 +141,134 @@ def load_ses():
 
 def save_ses(s):
     json.dump(s, open(SESF, "w"), indent=1)
+
+# ---------- pembayaran ----------
+def pay_config():
+    try:
+        cfg = json.load(open(PAYF))
+        # merge default untuk key yang belum ada
+        for k, v in DEFAULT_PAYMENT.items():
+            cfg.setdefault(k, v)
+        return cfg
+    except Exception:
+        json.dump(DEFAULT_PAYMENT, open(PAYF, "w"), indent=1)
+        return dict(DEFAULT_PAYMENT)
+
+def load_pays():
+    try:
+        return json.load(open(PAYMENTS)) if os.path.exists(PAYMENTS) else {}
+    except Exception:
+        return {}
+
+def save_pays(p):
+    json.dump(p, open(PAYMENTS, "w"), indent=1)
+
+def rp(n):
+    return "Rp" + f"{n:,}".replace(",", ".")
+
+def make_qr_png(data):
+    """Generate QR PNG bytes (untuk QRIS demo)."""
+    import qrcode, io
+    qr = qrcode.QRCode(box_size=8, border=2)
+    qr.add_data(data)
+    qr.make(fit=True)
+    buf = io.BytesIO()
+    qr.make_image(fill_color="black", back_color="white").save(buf, format="PNG")
+    return buf.getvalue()
+
+def create_payment(pkg_id, ip):
+    """Buat pembayaran baru. Return (pay_id, info). Mode demo: QR lokal."""
+    cfg = pay_config()
+    pkg = next((x for x in cfg["packages"] if x["id"] == pkg_id), None)
+    if not pkg:
+        return None, "Paket tidak ditemukan."
+    pays = load_pays()
+    pay_id = secrets.token_hex(6)
+    pay = {
+        "id": pay_id, "package_id": pkg_id, "ip": ip,
+        "amount": pkg["price"], "duration": pkg["duration"],
+        "label": pkg["label"], "status": "pending",
+        "created": datetime.datetime.now().isoformat(timespec="seconds"),
+        "transaction_id": None, "bill_url": None,
+    }
+    if cfg["mode"] == "mayar" and cfg["mayar"]["api_key"]:
+        ok, info = mayar_create_invoice(cfg, pay)
+        if not ok:
+            return None, info
+        pay["transaction_id"] = info.get("transaction_id")
+        pay["bill_url"] = info.get("bill_url")
+    else:
+        # demo: QR berisi string demo
+        pay["qr_data"] = "DEMO-QRIS-BADANWIFINASIONAL-" + pay_id.upper()
+    pays[pay_id] = pay
+    save_pays(pays)
+    return pay_id, None
+
+def activate_payment(pay_id):
+    """Aktifkan akses internet untuk pembayaran yang lunas."""
+    pays = load_pays()
+    pay = pays.get(pay_id)
+    if not pay or pay["status"] == "paid":
+        return False
+    pay["status"] = "paid"
+    pay["paid_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+    save_pays(pays)
+    ip = pay["ip"]
+    dur = int(pay["duration"])
+    end = datetime.datetime.now().timestamp() + dur
+    s = load_ses()
+    s[ip] = {"code": "QRIS-" + pay_id[:6].upper(),
+             "start": datetime.datetime.now().isoformat(timespec="seconds"),
+             "end": end, "duration": dur, "via": "qris"}
+    save_ses(s)
+    subprocess.run(["ipset", "add", "portal_allow", ip,
+                    "timeout", str(dur)], capture_output=True)
+    return True
+
+# ---------- Mayar (klien asli dari repo badan-wifi-nasional-qris-paymet) ----------
+def _mayar_client(cfg):
+    """Buat MayarClient asli. Return None jika modul qris belum dipasang."""
+    try:
+        sys.path.insert(0, "/opt/portal")
+        from qris.mayar import MayarClient, SANDBOX_BASE
+        m = cfg["mayar"]
+        return MayarClient(api_key=m["api_key"],
+                           base=m.get("base") or SANDBOX_BASE)
+    except Exception:
+        return None
+
+def mayar_create_invoice(cfg, pay):
+    """Buat invoice Mayar asli. Return (True, {transaction_id, bill_url})
+    atau (False, pesan_error)."""
+    client = _mayar_client(cfg)
+    if not client:
+        return False, "Modul qris belum dipasang di /opt/portal/qris."
+    m = cfg["mayar"]
+    tier = m.get("tiers", {}).get(pay["package_id"], "")
+    if not tier:
+        return False, ("tier_id untuk paket %s belum diisi "
+                       "(atur di payment.json)" % pay["package_id"])
+    try:
+        member_id = client.register_member(
+            product_id=m["product_id"], tier_id=tier,
+            name="wifi-user", email="wifi@local")
+        tx, url = client.create_member_invoice(member_id, m["product_id"])
+        return True, {"transaction_id": tx, "bill_url": url,
+                      "member_id": member_id}
+    except Exception as e:
+        return False, "Mayar: %s" % e
+
+def mayar_check_status(cfg, pay):
+    """Cek status invoice ke Mayar. Return 'paid'/'pending'."""
+    client = _mayar_client(cfg)
+    if not client or not pay.get("transaction_id"):
+        return "pending"
+    try:
+        from qris.mayar import MayarClient as MC
+        inv = client.get_invoice(pay["transaction_id"])
+        return "paid" if MC.is_paid(inv) else "pending"
+    except Exception:
+        return "pending"
 
 def kick_ip(ip):
     """Putuskan akses 1 IP: hapus dari ipset + sesi."""
@@ -180,7 +336,9 @@ def form(err=""):
         "<label for=\"v\">Kode voucher</label>\n"
         "<input class=\"code\" id=\"v\" name=\"voucher\" placeholder=\"XXXX-XXXX\"\n"
         "maxlength=\"12\" autocomplete=\"off\" autofocus required>\n"
-        "<button type=\"submit\">Hubungkan</button></form>")
+        "<button type=\"submit\">Hubungkan</button></form>"
+        "<div class=\"meta\" style=\"text-align:center\">"
+        "Belum punya voucher? <a href=\"/buy\">Beli paket via QRIS</a></div>")
 
 def success(code, dur_sec=0):
     info = ""
@@ -192,6 +350,54 @@ def success(code, dur_sec=0):
         "<div class=\"ok-icon\">&#10003;</div><h1>Terhubung</h1>\n"
         "<p class=\"sub\">Perangkat ini sekarang memiliki akses internet.</p>\n"
         "<div class=\"meta\">Voucher <b>" + code + "</b> telah digunakan.</div>" + info)
+
+def page_buy():
+    cfg = pay_config()
+    cards = ""
+    for p in cfg["packages"]:
+        cards += (
+            "<form method=\"POST\" action=\"/buy\" style=\"margin:0\">"
+            "<input type=\"hidden\" name=\"package_id\" value=\"" + p["id"] + "\">"
+            "<button type=\"submit\" class=\"pkg\">"
+            "<span class=\"pkg-label\">" + p["label"] + "</span>"
+            "<span class=\"pkg-price\">" + rp(p["price"]) + "</span>"
+            "</button></form>")
+    demo_note = ""
+    if cfg["mode"] == "demo":
+        demo_note = ("<div class=\"meta\" style=\"text-align:center\">"
+                     "Mode demo &mdash; pembayaran disimulasikan, "
+                     "tidak ada uang asli.</div>")
+    return page("Badan Wifi Nasional - Beli Paket",
+        LOGO_IMG +
+        "<h1 style=\"text-align:center\">Pilih Paket Internet</h1>\n"
+        "<p class=\"sub\" style=\"text-align:center\">Bayar via QRIS, "
+        "akses langsung aktif otomatis.</p>\n"
+        "<div class=\"pkgs\">" + cards + "</div>\n"
+        "<div class=\"meta\" style=\"text-align:center\">"
+        "Punya kode voucher? <a href=\"/\">Masukkan di sini</a></div>" + demo_note)
+
+def page_pay(pay):
+    cfg = pay_config()
+    if cfg["mode"] == "demo":
+        action = (
+            "<form method=\"POST\" action=\"/pay/confirm\" style=\"margin-top:18px\">"
+            "<input type=\"hidden\" name=\"id\" value=\"" + pay["id"] + "\">"
+            "<button type=\"submit\">Saya Sudah Bayar (Simulasi)</button></form>"
+            "<div class=\"meta\" style=\"text-align:center\">Mode demo: "
+            "klik tombol untuk mensimulasikan pembayaran berhasil.</div>")
+    else:
+        action = (
+            "<div class=\"meta\" style=\"text-align:center\">"
+            "Scan QR dengan GoPay / OVO / DANA / m-banking.<br>"
+            "Halaman ini mengecek otomatis.</div>"
+            "<script>setTimeout(function(){location.reload()},8000)</script>")
+    return page("Badan Wifi Nasional - Bayar QRIS",
+        LOGO_IMG.replace('logo-img', 'logo-img sm') +
+        "<h1 style=\"text-align:center\">Bayar " + rp(pay["amount"]) + "</h1>\n"
+        "<p class=\"sub\" style=\"text-align:center\">Paket <b>" + pay["label"] +
+        "</b> &middot; scan QRIS di bawah:</p>\n"
+        "<img class=\"qr\" src=\"/pay/qr?id=" + pay["id"] + "\" alt=\"QRIS\">" +
+        action)
 
 def admin_pass():
     try:
@@ -266,6 +472,24 @@ def admin_dashboard(msg=""):
     if not vrows:
         vrows = ("<tr><td colspan=\"6\" style=\"text-align:center;color:#94a3b8\">"
                  "Belum ada voucher</td></tr>")
+    # --- riwayat pembayaran QRIS ---
+    pays = load_pays()
+    prows = ""
+    for pid, p in sorted(pays.items(), key=lambda kv: kv[1].get("created", ""),
+                         reverse=True)[:20]:
+        st = ('<span class="badge b-green">Lunas</span>'
+              if p["status"] == "paid"
+              else '<span class="badge b-amber">Menunggu</span>')
+        prows += ("<tr><td class=\"mono\">" + pid[:8].upper() + "</td>"
+                  "<td>" + p.get("label", "-") + "</td>"
+                  "<td>" + rp(p.get("amount", 0)) + "</td>"
+                  "<td class=\"mono\">" + p.get("ip", "-") + "</td>"
+                  "<td>" + st + "</td></tr>")
+    pay_block = ""
+    if prows:
+        pay_block = ("<h2>Pembayaran QRIS (20 terakhir)</h2>\n"
+                     "<table><tr><th>ID</th><th>Paket</th><th>Nominal</th>"
+                     "<th>IP</th><th>Status</th></tr>" + prows + "</table>\n")
     # --- tabel sesi aktif (berdurasi) ---
     ses = load_ses()
     srows = ""
@@ -289,6 +513,37 @@ def admin_dashboard(msg=""):
     # --- dropdown durasi ---
     dur_opts = "".join(
         "<option value=\"" + str(s) + "\">" + l + "</option>" for l, s in DURATIONS)
+    # --- form pengaturan Mayar ---
+    pcfg = pay_config()
+    pm = pcfg["mayar"]
+    mode_demo_sel = " selected" if pcfg.get("mode") != "mayar" else ""
+    mode_mayar_sel = " selected" if pcfg.get("mode") == "mayar" else ""
+    base_sb_sel = " selected" if "mayar.club" in pm.get("base", "") else ""
+    base_pr_sel = " selected" if "mayar.id" in pm.get("base", "") and "club" not in pm.get("base", "") else ""
+    key_masked = ("****" + pm.get("api_key", "")[-4:] if pm.get("api_key") else "")
+    mayar_form = (
+        "<h2>Pengaturan Pembayaran (Mayar QRIS)</h2>\n"
+        "<form method=\"POST\" action=\"/admin/mayar\"><div class=\"grid2\">\n"
+        "<div><label>Mode pembayaran</label>"
+        "<select class=\"txt\" name=\"mode\">"
+        "<option value=\"demo\"" + mode_demo_sel + ">Demo (simulasi, tanpa uang asli)</option>"
+        "<option value=\"mayar\"" + mode_mayar_sel + ">Mayar (QRIS asli)</option>"
+        "</select></div>\n"
+        "<div><label>Mayar API base</label>"
+        "<select class=\"txt\" name=\"api_base\">"
+        "<option value=\"https://api.mayar.club/hl/v2\"" + base_sb_sel + ">Sandbox - mayar.club (uji coba)</option>"
+        "<option value=\"https://api.mayar.id/hl/v2\"" + base_pr_sel + ">Production - mayar.id (uang asli)</option>"
+        "</select></div>\n"
+        "<div><label>API Key " + (("(tersimpan " + key_masked + ")") if key_masked else "(belum diisi)") + "</label>"
+        "<input class=\"txt mono\" type=\"password\" name=\"api_key\" placeholder=\"Paste API key Mayar di sini\" autocomplete=\"off\"></div>\n"
+        "<div><label>Product ID (dashboard Mayar)</label>"
+        "<input class=\"txt mono\" name=\"product_id\" value=\"" + pm.get("product_id", "") + "\"></div>\n"
+        "<div><label>Webhook token</label>"
+        "<input class=\"txt mono\" name=\"webhook_token\" value=\"" + pm.get("webhook_token", "") + "\"></div>\n"
+        "</div>"
+        "<div class=\"meta\">API key hanya diganti jika kolom diisi. "
+        "Tier ID per paket diatur di file <span class=\"mono\">/opt/portal/payment.json</span>.</div>\n"
+        "<button type=\"submit\">Simpan pengaturan</button></form>\n")
     m = "<div class=\"ok\">" + msg + "</div>" if msg else ""
     return page("Admin - Badan Wifi Nasional",
         "<div class=\"topbar\"><div class=\"adm-head\">" + LOGO_IMG.replace('logo-img', 'logo-img xs') +
@@ -300,7 +555,8 @@ def admin_dashboard(msg=""):
         "<h2>Perangkat terhubung (" + str(len(devs)) + ")</h2>\n"
         "<table><tr><th>Perangkat</th><th>MAC</th><th>Sinyal</th><th>Status</th><th>Aksi</th></tr>"
         + rows + "</table>\n"
-        + ses_block +
+        + ses_block + pay_block +
+        mayar_form +
         "<h2>Buat voucher baru</h2>\n"
         "<form method=\"POST\" action=\"/admin/gen\"><div class=\"grid2\">\n"
         "<div><label>Jumlah</label>"
@@ -366,6 +622,47 @@ class H(BaseHTTPRequestHandler):
                 self.send_response(404)
                 self.end_headers()
             return
+        if u.path == "/buy":
+            self._send(page_buy())
+            return
+        if u.path == "/pay":
+            q = parse_qs(u.query)
+            pay = load_pays().get(q.get("id", [""])[0])
+            if not pay:
+                self._send(form("Pembayaran tidak ditemukan."))
+                return
+            if pay["status"] == "paid":
+                self._send(success("QRIS-" + pay["id"][:6].upper(),
+                                   int(pay["duration"])))
+                return
+            # mode mayar: cek status ke API saat halaman dibuka
+            cfg = pay_config()
+            if cfg["mode"] == "mayar" and pay["status"] == "pending":
+                if mayar_check_status(cfg, pay) == "paid":
+                    activate_payment(pay["id"])
+                    self._send(success("QRIS-" + pay["id"][:6].upper(),
+                                       int(pay["duration"])))
+                    return
+            self._send(page_pay(pay))
+            return
+        if u.path == "/pay/qr":
+            q = parse_qs(u.query)
+            pay = load_pays().get(q.get("id", [""])[0])
+            if not pay:
+                self.send_response(404)
+                self.end_headers()
+                return
+            try:
+                data = make_qr_png(pay.get("qr_data", "BADANWIFINASIONAL"))
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception:
+                self.send_response(500)
+                self.end_headers()
+            return
         if u.path.startswith("/admin"):
             if self._need_auth():
                 return
@@ -390,8 +687,74 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path)
+        if u.path == "/webhook/mayar":
+            # webhook Mayar: body JSON mentah (bukan form)
+            n = int(self.headers.get("Content-Length", 0))
+            try:
+                payload = json.loads(self.rfile.read(n).decode() or "{}")
+            except Exception:
+                payload = {}
+            qs = parse_qs(urlparse(self.path).query)
+            cfg = pay_config()
+            token_ok = (qs.get("token", [""])[0] ==
+                        cfg["mayar"].get("webhook_token", ""))
+            if token_ok and payload.get("event") == "payment.received":
+                data = payload.get("data", {})
+                st = str(data.get("status", "")).lower()
+                if st in ("success", "paid", "successful"):
+                    tid = data.get("transactionId") or data.get("id")
+                    pays = load_pays()
+                    for pid, p in pays.items():
+                        if p.get("transaction_id") == tid and p["status"] == "pending":
+                            activate_payment(pid)
+                            break
+            self.send_response(200)
+            self.end_headers()
+            return
         n = int(self.headers.get("Content-Length", 0))
         q = parse_qs(self.rfile.read(n).decode())
+        if u.path == "/buy":
+            pay_id, err = create_payment(q.get("package_id", [""])[0],
+                                         self.client_address[0])
+            if err:
+                self._send(page_buy())
+                return
+            self._redir("/pay?id=" + pay_id)
+            return
+        if u.path == "/pay/confirm":
+            # mode demo: simulasi pembayaran berhasil
+            cfg = pay_config()
+            if cfg["mode"] != "demo":
+                self.send_response(403)
+                self.end_headers()
+                return
+            pay_id = q.get("id", [""])[0]
+            pays = load_pays()
+            pay = pays.get(pay_id)
+            if not pay or pay["ip"] != self.client_address[0]:
+                self.send_response(403)
+                self.end_headers()
+                return
+            activate_payment(pay_id)
+            self._send(success("QRIS-" + pay_id[:6].upper(),
+                               int(pay["duration"])))
+            return
+        if u.path == "/admin/mayar":
+            if self._need_auth():
+                return
+            cfg = pay_config()
+            cfg["mode"] = "mayar" if q.get("mode", ["demo"])[0] == "mayar" else "demo"
+            m = cfg["mayar"]
+            m["api_base"] = q.get("api_base", [m.get("base", "")])[0] or m.get("base", "")
+            m["base"] = m["api_base"]
+            new_key = q.get("api_key", [""])[0].strip()
+            if new_key:
+                m["api_key"] = new_key
+            m["product_id"] = q.get("product_id", [""])[0].strip()
+            m["webhook_token"] = q.get("webhook_token", [""])[0].strip()
+            json.dump(cfg, open(PAYF, "w"), indent=1)
+            self._redir("/admin/?msg=Pengaturan+Mayar+disimpan")
+            return
         if u.path == "/admin/gen":
             if self._need_auth():
                 return
