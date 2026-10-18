@@ -117,6 +117,9 @@ border-radius:12px;padding:8px;background:#fff}
 padding:14px;margin:12px 0}
 .order-code{font-family:ui-monospace,monospace;font-size:26px;font-weight:800;
 letter-spacing:3px;text-align:center;color:#1e40af;margin-top:6px}
+.link-box{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;
+padding:10px 12px;margin:8px 0;font-size:12px;word-break:break-all;
+text-align:center;font-family:ui-monospace,monospace}
 .steps{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;
 padding:12px 14px;margin-top:14px;font-size:13px;line-height:1.7;color:#334155}
 .info-box{background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;
@@ -451,24 +454,29 @@ def page_pay(pay):
         qr_block = ("<img class=\"qr\" src=\"/pay/qr?id=" + pay["id"] +
                     "\" alt=\"QRIS\">")
     else:
-        # mode mayar: link pembayaran bisa diklik langsung (tanpa scan HP lain)
+        # mode mayar: user HARUS salin link + kode SEBELUM matikan WiFi,
+        # karena halaman ini (IP lokal) tidak bisa dibuka pakai kuota
         bill = pay.get("bill_url") or "#"
         ocode = pay.get("order_code", "")
         action = (
             "<div class=\"order-box\"><div class=\"meta\" style=\"text-align:center\">"
-            "Kode order kamu:</div>"
+            "Kode order kamu (screenshot!):</div>"
             "<div class=\"order-code\">" + ocode + "</div></div>"
+            "<div class=\"steps\" style=\"border-color:#f59e0b;background:#fffbeb\">"
+            "<b>⚠️ PENTING — baca dulu sebelum bayar:</b><br>"
+            "1. <b>Screenshot</b> kode order di atas<br>"
+            "2. <b>Salin link pembayaran</b> di bawah (tahan & salin)<br>"
+            "3. <b>Matikan WiFi</b> HP — pakai kuota dulu<br>"
+            "4. Buka link yang disalin, bayar via QRIS / e-wallet<br>"
+            "5. <b>Nyalakan WiFi</b> lagi → connect <b>BADAN WIFI NASIONAL</b><br>"
+            "6. Di halaman utama klik <b>Klaim akses</b>, masukkan kode order"
+            "</div>"
+            "<div class=\"meta\" style=\"text-align:center;margin-top:10px\">"
+            "Link pembayaran (tahan untuk menyalin):</div>"
+            "<div class=\"link-box\"><a href=\"" + bill + "\">" + bill + "</a></div>"
             "<a href=\"" + bill + "\" target=\"_blank\">"
             "<button type=\"button\" style=\"margin-top:14px\">"
             "Buka Halaman Pembayaran</button></a>"
-            "<div class=\"steps\">"
-            "<b>Cara bayar pakai kuota HP:</b><br>"
-            "1. <b>Screenshot</b> kode order di atas<br>"
-            "2. <b>Matikan WiFi</b> HP (pakai kuota dulu)<br>"
-            "3. Klik tombol di atas, bayar via QRIS / e-wallet<br>"
-            "4. <b>Nyalakan WiFi</b> lagi, connect ke <b>BADAN WIFI NASIONAL</b><br>"
-            "5. Masukkan kode order di halaman utama"
-            "</div>"
             "<script>setTimeout(function(){location.reload()},15000)</script>")
         qr_block = ("<img class=\"qr\" src=\"/pay/qr?id=" + pay["id"] +
                     "\" alt=\"QRIS\">")
