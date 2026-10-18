@@ -226,18 +226,25 @@ def create_payment(pkg_id, ip):
 
 def activate_payment_for_ip(pay, ip):
     """Aktifkan akses untuk IP tertentu (bisa beda dari IP saat beli,
-    mis. user putus-sambung WiFi untuk bayar pakai kuota)."""
+    mis. user putus-sambung WiFi untuk bayar pakai kuota).
+    Kalau kode diklaim dari IP baru, sesi IP lama dipindah (tidak diduplikat)."""
     pays = load_pays()
     pid = pay["id"]
     pay = pays.get(pid, pay)
     if pay["status"] != "paid":
         pay["status"] = "paid"
         pay["paid_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+    old_ip = pay.get("claimed_ip")
     pay["claimed_ip"] = ip
     save_pays(pays)
+    s = load_ses()
+    # pindahkan sesi: cabut akses IP lama kalau beda
+    if old_ip and old_ip != ip:
+        s.pop(old_ip, None)
+        subprocess.run(["ipset", "del", "portal_allow", old_ip],
+                       capture_output=True)
     dur = int(pay["duration"])
     end = datetime.datetime.now().timestamp() + dur
-    s = load_ses()
     s[ip] = {"code": "QRIS-" + pid[:6].upper(),
              "start": datetime.datetime.now().isoformat(timespec="seconds"),
              "end": end, "duration": dur, "via": "qris"}
