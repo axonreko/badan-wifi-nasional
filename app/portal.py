@@ -25,7 +25,10 @@ DEFAULT_PAYMENT = {
         "api_key": "",
         "api_base": "https://api.mayar.club/hl/v2",
         "webhook_token": ""
-    }
+    },
+    # URL publik halaman bayar (via Tailscale Funnel). User salin link ini
+    # sebelum matikan WiFi — bisa dibuka pakai kuota HP.
+    "public_base": "https://aml-s9xx-box.tailc28155.ts.net/bayar"
 }
 
 # preset durasi akses (detik): label -> detik. 0 = tanpa batas waktu
@@ -454,29 +457,32 @@ def page_pay(pay):
         qr_block = ("<img class=\"qr\" src=\"/pay/qr?id=" + pay["id"] +
                     "\" alt=\"QRIS\">")
     else:
-        # mode mayar: user HARUS salin link + kode SEBELUM matikan WiFi,
-        # karena halaman ini (IP lokal) tidak bisa dibuka pakai kuota
-        bill = pay.get("bill_url") or "#"
+        # mode mayar: user dapat LINK PUBLIK yang bisa dibuka pakai kuota HP.
+        # Link ini menampilkan kode order + tombol bayar + status live,
+        # jadi user cukup simpan 1 link sebelum matikan WiFi.
         ocode = pay.get("order_code", "")
+        pub_base = cfg.get("public_base", "").rstrip("/")
+        pub_link = pub_base + "/" + ocode if pub_base else (pay.get("bill_url") or "#")
         action = (
             "<div class=\"order-box\"><div class=\"meta\" style=\"text-align:center\">"
-            "Kode order kamu (screenshot!):</div>"
+            "Kode order kamu (screenshot juga boleh):</div>"
             "<div class=\"order-code\">" + ocode + "</div></div>"
             "<div class=\"steps\" style=\"border-color:#f59e0b;background:#fffbeb\">"
-            "<b>⚠️ PENTING — baca dulu sebelum bayar:</b><br>"
-            "1. <b>Screenshot</b> kode order di atas<br>"
-            "2. <b>Salin link pembayaran</b> di bawah (tahan & salin)<br>"
-            "3. <b>Matikan WiFi</b> HP — pakai kuota dulu<br>"
-            "4. Buka link yang disalin, bayar via QRIS / e-wallet<br>"
-            "5. <b>Nyalakan WiFi</b> lagi → connect <b>BADAN WIFI NASIONAL</b><br>"
-            "6. Di halaman utama klik <b>Klaim akses</b>, masukkan kode order"
+            "<b>⚠️ Cara bayar pakai kuota HP:</b><br>"
+            "1. <b>Salin link</b> di bawah ini (tahan & salin)<br>"
+            "2. <b>Matikan WiFi</b> HP — pakai kuota dulu<br>"
+            "3. Buka link yang disalin di Chrome → klik <b>BAYAR</b><br>"
+            "4. Setelah bayar, <b>nyalakan WiFi</b> lagi → connect "
+            "<b>BADAN WIFI NASIONAL</b><br>"
+            "5. Di halaman portal klik <b>Klaim akses</b>, masukkan kode di atas"
             "</div>"
             "<div class=\"meta\" style=\"text-align:center;margin-top:10px\">"
-            "Link pembayaran (tahan untuk menyalin):</div>"
-            "<div class=\"link-box\"><a href=\"" + bill + "\">" + bill + "</a></div>"
-            "<a href=\"" + bill + "\" target=\"_blank\">"
+            "Link pembayaran & status (tahan untuk menyalin):</div>"
+            "<div class=\"link-box\"><a href=\"" + pub_link + "\">" + pub_link +
+            "</a></div>"
+            "<a href=\"" + pub_link + "\" target=\"_blank\">"
             "<button type=\"button\" style=\"margin-top:14px\">"
-            "Buka Halaman Pembayaran</button></a>"
+            "Buka Link Pembayaran</button></a>"
             "<script>setTimeout(function(){location.reload()},15000)</script>")
         qr_block = ("<img class=\"qr\" src=\"/pay/qr?id=" + pay["id"] +
                     "\" alt=\"QRIS\">")

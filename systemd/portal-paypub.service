@@ -1,0 +1,13 @@
+[Unit]
+Description=Halaman pembayaran publik (via Tailscale Funnel)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/portal/public_pay.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
