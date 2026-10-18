@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Captive portal Badan Wifi Nasional: voucher + panel admin."""
 import subprocess, json, os, sys, datetime, re, base64, secrets, threading, time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 BIND = "192.168.50.1"
@@ -822,4 +822,9 @@ class H(BaseHTTPRequestHandler):
 # bersihkan sesi kadaluarsa tiap 30 detik (background)
 threading.Thread(target=sweep, daemon=True).start()
 
-HTTPServer((BIND, PORT), H).serve_forever()
+class PortalServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+    timeout = 10  # jangan nunggu request setengah-setengah lebih dari 10 detik
+
+PortalServer((BIND, PORT), H).serve_forever()
