@@ -1,0 +1,6 @@
+# Rahasia — jangan di-commit
+admin_pass.txt
+vouchers.json
+sessions.json
+*.log
+__pycache__/

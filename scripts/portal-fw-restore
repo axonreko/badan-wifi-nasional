@@ -1,0 +1,4 @@
+#!/bin/bash
+# buat ipset kalau belum ada, flush kalau sudah ada
+ipset list portal_allow >/dev/null 2>&1 && ipset flush portal_allow || ipset restore -f /etc/iptables/ipset.rules
+iptables-restore /etc/iptables/rules.v4

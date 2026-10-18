@@ -1,0 +1,8 @@
+[Unit]
+Description=Captive portal web STB-Portal
+After=network.target portal-net.service
+[Service]
+ExecStart=/usr/bin/python3 /opt/portal/portal.py
+Restart=always
+[Install]
+WantedBy=multi-user.target

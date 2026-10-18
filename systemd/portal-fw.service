@@ -1,0 +1,10 @@
+[Unit]
+Description=Restore portal firewall + ipset
+After=network.target
+Before=portal-web.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/portal-fw-restore
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
